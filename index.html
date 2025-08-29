@@ -67,6 +67,9 @@ function App() {
 
         const subjects = [...new Set(parsedSessions.map(s => s.subject).filter(Boolean))];
         setAvailableSubjects(['All', ...subjects]);
+      } else {
+        // If no stored sessions, ensure availableSubjects is initialized with 'All'
+        setAvailableSubjects(['All']);
       }
     } catch (error) {
       console.error("Error loading study sessions from local storage:", error);
@@ -204,7 +207,7 @@ function App() {
 
             if (recurrenceType === 'daily') {
               addSessionLogic(currentDay);
-            } else if (recururrenceType === 'weekly') {
+            } else if (recurrenceType === 'weekly') {
               const dayName = daysOfWeek[currentDay.getDay()];
               if (recurrenceDays[dayName]) {
                 addSessionLogic(currentDay);
