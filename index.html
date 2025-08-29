@@ -13,9 +13,6 @@ const firebaseConfig = {
   appId: "1:321292223199:web:0944c158e0f8f595a3df6a"
 };
 
-// Using the projectId from your config is implicitly used by Firestore,
-// no longer explicitly needed for path construction after path simplification.
-
 // Helper to format date for display
 const formatDateTime = (timestamp) => {
   if (!timestamp || !timestamp.toDate) return 'N/A';
@@ -124,14 +121,13 @@ function App() {
     const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
       if (!user) {
         try {
-          // Always sign in anonymously when using the user's provided Firebase config
-          // This avoids "auth/custom-token-mismatch" errors with Canvas-specific tokens.
           await signInAnonymously(firebaseAuth);
         } catch (error) {
           console.error("Error signing in anonymously:", error);
+          setModalMessage(`Authentication error: ${error.message}. Please check your Firebase project settings.`);
+          setShowModal(true);
         }
       }
-      // Use the authenticated user's UID or a random UUID if no user is signed in
       setUserId(firebaseAuth.currentUser?.uid || crypto.randomUUID());
       setLoading(false);
     });
@@ -181,7 +177,10 @@ function App() {
 
   // Fetch study sessions from Firestore
   useEffect(() => {
-    if (!db || !userId) return;
+    if (!db || !userId) {
+      console.log("Firestore fetch deferred: DB not ready or userId not set.");
+      return; // Defer fetching until db and userId are available
+    }
 
     // Simplified Firestore path: `users/{userId}/studySessions`
     const sessionCollectionRef = collection(db, `users/${userId}/studySessions`);
@@ -203,10 +202,13 @@ function App() {
       setAvailableSubjects(['All', ...subjects]);
     }, (error) => {
       console.error("Error fetching study sessions:", error);
+      setModalMessage(`Error fetching data: ${error.message}. Please check your Firebase rules and internet connection.`);
+      setShowModal(true);
     });
 
     return () => unsubscribe();
-  }, [db, userId]);
+  }, [db, userId]); // Depend on db and userId
+
 
   const showConfirmationModal = useCallback((message, onConfirm) => {
     setModalMessage(message);
@@ -463,6 +465,11 @@ function App() {
         body: JSON.stringify(payload)
       });
 
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`API call failed with status ${response.status}: ${errorData.error?.message || 'Unknown error'}`);
+      }
+
       const result = await response.json();
 
       if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
@@ -514,12 +521,12 @@ function App() {
         setShowModal(true);
 
       } else {
-        setModalMessage("Could not generate a schedule. Please try again with different tasks or available hours.");
+        setModalMessage("Could not generate a schedule. The AI returned an unexpected response. Please try again.");
         setShowModal(true);
       }
     } catch (error) {
       console.error("Error generating schedule with AI:", error);
-      setModalMessage(`Error generating schedule: ${error.message}`);
+      setModalMessage(`Error generating schedule: ${error.message}. Please check your network and API key.`);
       setShowModal(true);
     } finally {
       setLoading(false);
