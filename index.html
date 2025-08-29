@@ -1,0 +1,1322 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, query, orderBy, onSnapshot, doc, updateDoc, deleteDoc, serverTimestamp, where, getDocs, Timestamp } from 'firebase/firestore';
+
+// Your Firebase configuration - directly integrated for GitHub deployment
+const firebaseConfig = {
+  apiKey: "AIzaSyB-dGtpDTkBaWKrSWboK0WAV6_AGU888o0",
+  authDomain: "calander-e5403.firebaseapp.com",
+  projectId: "calander-e5403",
+  storageBucket: "calander-e5403.firebasestorage.app",
+  messagingSenderId: "321292223199",
+  appId: "1:321292223199:web:0944c158e0f8f595a3df6a"
+};
+
+// Using the projectId from your config is implicitly used by Firestore,
+// no longer explicitly needed for path construction after path simplification.
+
+// Helper to format date for display
+const formatDateTime = (timestamp) => {
+  if (!timestamp || !timestamp.toDate) return 'N/A';
+  const date = timestamp.toDate();
+  return date.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: true,
+  });
+};
+
+const formatTime = (date) => {
+  return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: 'numeric', hour12: true });
+};
+
+// Helper to convert Date to Firestore Timestamp
+const toFirestoreTimestamp = (date) => {
+  if (!date) return null;
+  return Timestamp.fromDate(date);
+};
+
+// Notification permission handler
+const requestNotificationPermission = async () => {
+  if (!("Notification" in window)) {
+    console.warn("This browser does not support desktop notification");
+    return;
+  }
+  if (Notification.permission === "default") {
+    await Notification.requestPermission();
+  }
+};
+
+function App() {
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [studySessions, setStudySessions] = useState([]);
+  const [sessionTitle, setSessionTitle] = useState('');
+  const [sessionDate, setSessionDate] = useState('');
+  const [sessionTime, setSessionTime] = useState('');
+  const [sessionDuration, setSessionDuration] = useState(60); // Default 60 minutes
+  const [sessionSubject, setSessionSubject] = useState('');
+  const [editingSession, setEditingSession] = useState(null);
+  const [showModal, setShowModal] = useState(false);
+  const [modalMessage, setModalMessage] = useState('');
+  const [modalCallback, setModalCallback] = useState(null);
+
+  // New state for Day Detail Modal
+  const [showDayDetailModal, setShowDayDetailModal] = useState(false);
+  const [selectedDayForDetail, setSelectedDayForDetail] = useState(null);
+
+  // Recurring Session States
+  const [isRecurring, setIsRecurring] = useState(false);
+  const [recurrenceType, setRecurrenceType] = useState('weekly'); // 'daily', 'weekly'
+  const [recurrenceDays, setRecurrenceDays] = useState({
+    Mon: false, Tue: false, Wed: false, Thu: false, Fri: false, Sat: false, Sun: false
+  });
+
+  // AI Planning States
+  const [dailyTasks, setDailyTasks] = useState([]);
+  const [newTaskInput, setNewTaskInput] = useState('');
+  const [newTaskDuration, setNewTaskDuration] = useState(30);
+  const [newTaskPriority, setNewTaskPriority] = useState('Medium');
+  const [aiPlanningDate, setAiPlanningDate] = useState(new Date().toISOString().split('T')[0]);
+  const [availableStudyHours, setAvailableStudyHours] = useState(4);
+  const [aiBreakFrequency, setAiBreakFrequency] = useState(45); // e.g., break every 45 mins
+  const [aiBreakDuration, setAiBreakDuration] = useState(10); // e.g., 10-minute break
+
+  // Filter States
+  const [selectedSubjectFilter, setSelectedSubjectFilter] = useState('All');
+  const [availableSubjects, setAvailableSubjects] = useState([]);
+
+  // UI States
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [currentCalendarDate, setCurrentCalendarDate] = useState(new Date());
+  const [showManualForm, setShowManualForm] = useState(false); // New state for manual form visibility
+  const [showAiPlanning, setShowAiPlanning] = useState(false);   // New state for AI planning visibility
+  const [showAnalytics, setShowAnalytics] = useState(false);     // Existing state for analytics visibility
+  const [showListView, setShowListView] = useState(false); // New state for list view visibility
+
+  // Drag and Drop for Daily Tasks
+  const dragItem = useRef(null);
+  const dragOverItem = useRef(null);
+
+  const handleSort = () => {
+    let _dailyTasks = [...dailyTasks];
+    const draggedItemContent = _dailyTasks.splice(dragItem.current, 1)[0];
+    _dailyTasks.splice(dragOverItem.current, 0, draggedItemContent);
+    dragItem.current = null;
+    dragOverItem.current = null;
+    setDailyTasks(_dailyTasks);
+  };
+
+
+  // Initialize Firebase and handle authentication
+  useEffect(() => {
+    const appInstance = initializeApp(firebaseConfig);
+    const firestore = getFirestore(appInstance);
+    const firebaseAuth = getAuth(appInstance);
+    setDb(firestore);
+    setAuth(firebaseAuth);
+
+    const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+      if (!user) {
+        try {
+          // Always sign in anonymously when using the user's provided Firebase config
+          // This avoids "auth/custom-token-mismatch" errors with Canvas-specific tokens.
+          await signInAnonymously(firebaseAuth);
+        } catch (error) {
+          console.error("Error signing in anonymously:", error);
+        }
+      }
+      // Use the authenticated user's UID or a random UUID if no user is signed in
+      setUserId(firebaseAuth.currentUser?.uid || crypto.randomUUID());
+      setLoading(false);
+    });
+
+    // Apply dark mode preference on load
+    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+      setIsDarkMode(true);
+    } else {
+      document.documentElement.classList.remove('dark');
+      setIsDarkMode(false);
+    }
+
+    // Request notification permission
+    requestNotificationPermission();
+
+    return () => unsubscribe();
+  }, []); // Empty dependency array as firebaseConfig is now constant
+
+  // Notification setup
+  useEffect(() => {
+    const notificationInterval = setInterval(() => {
+      if (Notification.permission === "granted" && userId) {
+        const now = new Date();
+        studySessions.forEach(session => {
+          if (!session.isCompleted && session.startTime && session.startTime.toDate) {
+            const startTime = session.startTime.toDate();
+            const timeUntilSession = startTime.getTime() - now.getTime();
+
+            // Notify 5 minutes before the session
+            if (timeUntilSession > 0 && timeUntilSession <= 5 * 60 * 1000) {
+              new Notification("Upcoming Study Session", {
+                body: `Your session "${session.title}" is starting soon at ${formatTime(startTime)}!`,
+                icon: "https://placehold.co/48x48/ffb6c1/ffffff?text=SP" // Soft pink icon
+              });
+              // To prevent multiple notifications for the same session, you might want to mark it as 'notified'
+              // This requires an additional field in Firestore and an update here.
+            }
+          }
+        });
+      }
+    }, 60 * 1000); // Check every minute
+
+    return () => clearInterval(notificationInterval);
+  }, [studySessions, userId]);
+
+
+  // Fetch study sessions from Firestore
+  useEffect(() => {
+    if (!db || !userId) return;
+
+    // Simplified Firestore path: `users/{userId}/studySessions`
+    const sessionCollectionRef = collection(db, `users/${userId}/studySessions`);
+    const q = query(sessionCollectionRef, orderBy('startTime', 'asc'));
+
+    console.log("Attempting to fetch from path:", `users/${userId}/studySessions`);
+    console.log("Current User ID:", userId);
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sessions = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        startTime: doc.data().startTime,
+        endTime: doc.data().endTime,
+      }));
+      setStudySessions(sessions);
+
+      const subjects = [...new Set(sessions.map(s => s.subject).filter(Boolean))];
+      setAvailableSubjects(['All', ...subjects]);
+    }, (error) => {
+      console.error("Error fetching study sessions:", error);
+    });
+
+    return () => unsubscribe();
+  }, [db, userId]);
+
+  const showConfirmationModal = useCallback((message, onConfirm) => {
+    setModalMessage(message);
+    setModalCallback(() => onConfirm);
+    setShowModal(true);
+  }, []);
+
+  const closeModal = useCallback(() => {
+    setShowModal(false);
+    setModalMessage('');
+    setModalCallback(null);
+  }, []);
+
+  const handleModalConfirm = useCallback(() => {
+    if (modalCallback) {
+      modalCallback();
+    }
+    closeModal();
+  }, [modalCallback, closeModal]);
+
+  const toggleRecurrenceDay = (day) => {
+    setRecurrenceDays(prev => ({ ...prev, [day]: !prev[day] }));
+  };
+
+  // Conflict detection for manual sessions
+  const checkConflicts = (newStart, newEnd, sessionId = null) => {
+    const conflicts = studySessions.filter(session => {
+      if (session.id === sessionId) return false; // Don't check against itself during edit
+
+      const existingStart = session.startTime.toDate();
+      const existingEnd = session.endTime.toDate();
+
+      return (newStart < existingEnd && newEnd > existingStart);
+    });
+    return conflicts.length > 0;
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!sessionTitle || !sessionDate || !sessionTime || !sessionDuration) {
+      setModalMessage("Please fill in all fields.");
+      setShowModal(true);
+      return;
+    }
+
+    if (!db || !userId) {
+      setModalMessage("Database not initialized or user not authenticated.");
+      setShowModal(true);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const baseStartDateTimeString = `${sessionDate}T${sessionTime}`;
+      const baseStartDateTime = new Date(baseStartDateTimeString);
+      const baseEndDateTime = new Date(baseStartDateTime.getTime() + sessionDuration * 60 * 1000);
+
+      if (checkConflicts(baseStartDateTime, baseEndDateTime, editingSession?.id)) {
+        setModalMessage("Warning: This session overlaps with an existing one. Please adjust the time or date.");
+        setShowModal(true);
+        setLoading(false);
+        return;
+      }
+
+      const addSessionToFirestore = async (startDt) => {
+        const endDt = new Date(startDt.getTime() + sessionDuration * 60 * 1000);
+        const sessionData = {
+          title: sessionTitle,
+          startTime: toFirestoreTimestamp(startDt),
+          endTime: toFirestoreTimestamp(endDt),
+          duration: sessionDuration,
+          subject: sessionSubject || null,
+          isCompleted: false,
+          createdAt: serverTimestamp(),
+          source: 'manual',
+        };
+        // Simplified Firestore path: `users/${userId}/studySessions`
+        await addDoc(collection(db, `users/${userId}/studySessions`), sessionData);
+      };
+
+      if (editingSession) {
+        // Simplified Firestore path: `users/${userId}/studySessions`
+        const sessionRef = doc(db, `users/${userId}/studySessions`, editingSession.id);
+        await updateDoc(sessionRef, {
+          title: sessionTitle,
+          startTime: toFirestoreTimestamp(baseStartDateTime),
+          endTime: toFirestoreTimestamp(baseEndDateTime),
+          duration: sessionDuration,
+          subject: sessionSubject || null,
+        });
+        setEditingSession(null);
+      } else {
+        if (isRecurring) {
+          const daysOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+          for (let i = 0; i < 28; i++) {
+            const currentDay = new Date(baseStartDateTime);
+            currentDay.setDate(baseStartDateTime.getDate() + i);
+
+            if (recurrenceType === 'daily') {
+              // Ensure we don't add duplicates for the same day multiple times if logic gets complicated
+              await addSessionToFirestore(currentDay);
+            } else if (recurrenceType === 'weekly') {
+              const dayName = daysOfWeek[currentDay.getDay()];
+              if (recurrenceDays[dayName]) {
+                await addSessionToFirestore(currentDay);
+              }
+            }
+          }
+        } else {
+          await addSessionToFirestore(baseStartDateTime);
+        }
+      }
+
+      // Reset form fields
+      setSessionTitle('');
+      setSessionDate('');
+      setSessionTime('');
+      setSessionDuration(60);
+      setSessionSubject('');
+      setIsRecurring(false);
+      setRecurrenceType('weekly');
+      setRecurrenceDays({ Mon: false, Tue: false, Wed: false, Thu: false, Fri: false, Sat: false, Sun: false });
+      setShowManualForm(false); // Close form after submission
+    } catch (error) {
+      console.error("Error adding/updating study session:", error);
+      setModalMessage(`Error: ${error.message}`);
+      setShowModal(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEdit = (session) => {
+    setEditingSession(session);
+    setSessionTitle(session.title);
+
+    const startDate = session.startTime.toDate();
+    setSessionDate(startDate.toISOString().split('T')[0]);
+    setSessionTime(startDate.toTimeString().slice(0, 5));
+    setSessionDuration(session.duration);
+    setSessionSubject(session.subject || '');
+    setIsRecurring(false);
+    setShowManualForm(true); // Open form for editing
+    setShowDayDetailModal(false); // Close day detail modal if open
+  };
+
+  const handleDelete = (sessionId) => {
+    showConfirmationModal("Are you sure you want to delete this study session?", async () => {
+      if (!db || !userId) return;
+      try {
+        setLoading(true);
+        // Simplified Firestore path: `users/${userId}/studySessions`
+        const sessionRef = doc(db, `users/${userId}/studySessions`, sessionId);
+        await deleteDoc(sessionRef);
+      } catch (error) {
+        console.error("Error deleting study session:", error);
+        setModalMessage(`Error deleting session: ${error.message}`);
+        setShowModal(true);
+      } finally {
+        setLoading(false);
+      }
+    });
+  };
+
+  const toggleComplete = async (session) => {
+    if (!db || !userId) return;
+    try {
+      setLoading(true);
+      // Simplified Firestore path: `users/${userId}/studySessions`
+      const sessionRef = doc(db, `users/${userId}/studySessions`, session.id);
+      await updateDoc(sessionRef, {
+        isCompleted: !session.isCompleted,
+      });
+    } catch (error) {
+      console.error("Error toggling completion status:", error);
+      setModalMessage(`Error updating status: ${error.message}`);
+      setShowModal(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddTask = () => {
+    if (newTaskInput.trim() && newTaskDuration > 0) {
+      setDailyTasks([...dailyTasks, { id: Date.now(), title: newTaskInput.trim(), duration: newTaskDuration, priority: newTaskPriority }]);
+      setNewTaskInput('');
+      setNewTaskDuration(30);
+      setNewTaskPriority('Medium');
+    }
+  };
+
+  const handleRemoveTask = (id) => {
+    setDailyTasks(dailyTasks.filter(task => task.id !== id));
+  };
+
+  const generateScheduleWithAI = async () => {
+    if (!db || !userId) {
+      setModalMessage("Database not initialized or user not authenticated.");
+      setShowModal(true);
+      return;
+    }
+    if (dailyTasks.length === 0) {
+      setModalMessage("Please add some tasks before generating a schedule.");
+      setShowModal(true);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const sortedTasks = [...dailyTasks].sort((a, b) => {
+        const priorityOrder = { 'Urgent': 0, 'High': 1, 'Medium': 2, 'Low': 3 };
+        return priorityOrder[a.priority] - priorityOrder[b.priority];
+      });
+
+      const taskList = sortedTasks.map(task =>
+        `${task.title} (${task.duration} minutes, Priority: ${task.priority})`
+      ).join('; ');
+
+      const prompt = `You are an AI study planner. Given the following tasks with their priorities and available study time, create a detailed study schedule for ${aiPlanningDate}.
+                      Prioritize tasks based on their urgency, ensuring high-priority tasks are scheduled first. Allocate time efficiently within the available hours,
+                      and include ${aiBreakDuration}-minute breaks approximately every ${aiBreakFrequency} minutes of study.
+                      Tasks for the day: ${taskList}.
+                      Total available study hours: ${availableStudyHours}.
+                      Please provide the schedule as a JSON array of study sessions.
+                      The schedule should be realistic and start at a reasonable time, e.g., 9:00 AM or 10:00 AM, and consider a logical flow.
+                      Each session should have a title, startTime (ISO 8601 string), endTime (ISO 8601 string), and duration (in minutes).`;
+
+      const apiKey = "";
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+      const payload = {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                "title": { "type": "STRING" },
+                "startTime": { "type": "STRING", "format": "date-time" },
+                "endTime": { "type": "STRING", "format": "date-time" },
+                "duration": { "type": "NUMBER" }
+              },
+              required: ["title", "startTime", "endTime", "duration"]
+            }
+          }
+        }
+      };
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+
+      if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
+        const json = result.candidates[0].content.parts[0].text;
+        const parsedSchedule = JSON.parse(json);
+
+        const startOfDay = new Date(aiPlanningDate);
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(aiPlanningDate);
+        endOfDay.setHours(23, 59, 59, 999);
+
+        // Fetch all AI-generated sessions without a date range filter to avoid index issues.
+        // Filter by date and then delete in memory.
+        const existingSessionsQuery = query(
+          // Simplified Firestore path: `users/${userId}/studySessions`
+          collection(db, `users/${userId}/studySessions`),
+          where('source', '==', 'ai_generated')
+        );
+        const existingDocsSnapshot = await getDocs(existingSessionsQuery);
+
+        // Filter these documents by date in JavaScript
+        const existingDocsToDelete = existingDocsSnapshot.docs.filter(doc => {
+            const sessionStartTime = doc.data().startTime.toDate();
+            return sessionStartTime >= startOfDay && sessionStartTime <= endOfDay;
+        });
+
+        const deletePromises = existingDocsToDelete.map(d => deleteDoc(doc(db, `users/${userId}/studySessions`, d.id)));
+        await Promise.all(deletePromises);
+
+        for (const session of parsedSchedule) {
+          const startTime = new Date(session.startTime);
+          const endTime = new Date(session.endTime);
+
+          // Simplified Firestore path: `users/${userId}/studySessions`
+          await addDoc(collection(db, `users/${userId}/studySessions`), {
+            title: session.title,
+            startTime: toFirestoreTimestamp(startTime),
+            endTime: toFirestoreTimestamp(endTime),
+            duration: session.duration,
+            subject: sortedTasks.find(t => session.title.includes(t.title))?.subject || null,
+            isCompleted: false,
+            createdAt: serverTimestamp(),
+            source: 'ai_generated',
+            priority: sortedTasks.find(t => session.title.includes(t.title))?.priority || null,
+          });
+        }
+        setDailyTasks([]);
+        setModalMessage("Study schedule generated and saved successfully!");
+        setShowModal(true);
+
+      } else {
+        setModalMessage("Could not generate a schedule. Please try again with different tasks or available hours.");
+        setShowModal(true);
+      }
+    } catch (error) {
+      console.error("Error generating schedule with AI:", error);
+      setModalMessage(`Error generating schedule: ${error.message}`);
+      setShowModal(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Progress Tracking & Analytics calculations
+  const totalStudyTime = studySessions.reduce((acc, session) => acc + session.duration, 0);
+  const completedStudyTime = studySessions.filter(s => s.isCompleted).reduce((acc, session) => acc + session.duration, 0);
+  const completionPercentage = totalStudyTime > 0 ? (completedStudyTime / totalStudyTime) * 100 : 0;
+
+  const getSubjectStudyTime = () => {
+    const subjectTimes = {};
+    studySessions.forEach(session => {
+      if (session.subject) {
+        subjectTimes[session.subject] = (subjectTimes[session.subject] || 0) + session.duration;
+      }
+    });
+    return subjectTimes;
+  };
+  const subjectStudyTime = getSubjectStudyTime();
+
+  // Dark Mode Toggle
+  const toggleDarkMode = () => {
+    if (isDarkMode) {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    } else {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    }
+    setIsDarkMode(!isDarkMode);
+  };
+
+  // Calendar View Logic
+  const daysInMonth = (year, month) => new Date(year, month + 1, 0).getDate();
+  const firstDayOfMonth = (year, month) => new Date(year, month, 1).getDay(); // 0 for Sunday, 1 for Monday
+
+  const getCalendarDays = (date) => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const numDays = daysInMonth(year, month);
+    const firstDay = firstDayOfMonth(year, month); // Day of week (0-6)
+    const prevMonthDays = daysInMonth(year, month - 1);
+
+    const days = [];
+
+    // Fill leading empty days from previous month
+    for (let i = firstDay === 0 ? 6 : firstDay - 1; i > 0; i--) { // Adjust for Sunday (0) to be last
+      days.push({
+        day: prevMonthDays - i + 1,
+        isCurrentMonth: false,
+        date: new Date(year, month - 1, prevMonthDays - i + 1)
+      });
+    }
+
+    // Fill current month days
+    for (let i = 1; i <= numDays; i++) {
+      days.push({
+        day: i,
+        isCurrentMonth: true,
+        date: new Date(year, month, i)
+      });
+    }
+
+    // Fill trailing empty days from next month
+    const remainingSlots = 42 - days.length; // Ensure 6 rows
+    for (let i = 1; i <= remainingSlots; i++) {
+      days.push({
+        day: i,
+        isCurrentMonth: false,
+        date: new Date(year, month + 1, i)
+      });
+    }
+
+    return days;
+  };
+
+  const calendarDays = getCalendarDays(currentCalendarDate);
+
+  const navCalendar = (delta) => {
+    const newDate = new Date(currentCalendarDate);
+    newDate.setMonth(newDate.getMonth() + delta);
+    setCurrentCalendarDate(newDate);
+  };
+
+  const getSessionsForDay = (date) => {
+    return studySessions.filter(session => {
+      const sessionDate = session.startTime.toDate();
+      return sessionDate.getFullYear() === date.getFullYear() &&
+             sessionDate.getMonth() === date.getMonth() &&
+             sessionDate.getDate() === date.getDate();
+    }).sort((a, b) => a.startTime.toDate().getTime() - b.startTime.toDate().getTime());
+  };
+
+  const filteredStudySessions = selectedSubjectFilter === 'All'
+    ? studySessions
+    : studySessions.filter(session => session.subject === selectedSubjectFilter);
+
+  // Handler for opening the day detail modal
+  const openDayDetail = (date) => {
+    setSelectedDayForDetail(date);
+    setShowDayDetailModal(true);
+  };
+
+  // Handler for closing the day detail modal
+  const closeDayDetail = () => {
+    setSelectedDayForDetail(null);
+    setShowDayDetailModal(false);
+  };
+
+
+  if (loading && !userId) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-pink-50 dark:bg-gray-900">
+        <div className="text-lg text-pink-700 dark:text-gray-300">Loading app...</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`min-h-screen bg-pink-50 text-pink-900 font-sans p-4 sm:p-6 lg:p-8 rounded-lg shadow-inner ${isDarkMode ? 'dark bg-gray-900 text-gray-100' : ''}`}>
+      <div className="max-w-5xl mx-auto bg-white dark:bg-gray-800 rounded-xl shadow-2xl overflow-hidden ring-4 ring-pink-300 dark:ring-fuchsia-700">
+        {/* User ID and Dark Mode Toggle (Subtle) */}
+        <div className="flex justify-between items-center p-4 bg-pink-100 dark:bg-gray-800">
+          <span className="text-xs text-pink-600 dark:text-gray-400">User ID: <span className="font-mono">{userId || 'N/A'}</span></span>
+          <button
+            onClick={toggleDarkMode}
+            className="p-1 rounded-full bg-pink-300 dark:bg-fuchsia-600 hover:bg-pink-400 dark:hover:bg-fuchsia-700 transition duration-200 ease-in-out"
+            aria-label="Toggle Dark Mode"
+          >
+            {isDarkMode ? (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-100" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 3v1m0 16v1m9-9h1M3 12H2m15.325-4.275l.707-.707M6.707 17.293l-.707.707M16.95 12.05l.01-.01m.01.011l-.01.011M7.05 7.05l-.01.01m.01-.011L7.05 7.05" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-pink-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9 9 0 008.354-5.646z" />
+              </svg>
+            )}
+          </button>
+        </div>
+
+        <main className="p-6 sm:p-8 lg:p-10">
+          {/* Main Title - Centered without header */}
+          <h1 className="text-4xl font-extrabold tracking-tight text-center text-pink-800 dark:text-gray-100 mb-6">Study Planner</h1>
+
+          {/* Calendar View (Main Content) */}
+          <section className="bg-pink-50 dark:bg-gray-700 p-6 rounded-lg shadow-lg ring-1 ring-fuchsia-200 dark:ring-fuchsia-600 w-full min-h-[90vh]"> {/* Increased min-h */}
+            <h2 className="text-2xl font-bold text-pink-800 dark:text-gray-100 mb-5">Calendar View</h2>
+            <div className="flex justify-between items-center mb-4">
+              <button onClick={() => navCalendar(-1)} className="p-2 rounded-full bg-pink-500 text-white hover:bg-pink-600">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0  010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+                </svg>
+              </button>
+              <h3 className="text-xl font-semibold text-pink-800 dark:text-gray-100">
+                {currentCalendarDate.toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+              </h3>
+              <button onClick={() => navCalendar(1)} className="p-2 rounded-full bg-pink-500 text-white hover:bg-pink-600">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+            <div className="grid grid-cols-7 gap-1 text-center text-sm font-medium text-pink-700 dark:text-gray-200 mb-2">
+              {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
+                <div key={day} className="py-2 bg-pink-200 dark:bg-gray-600 rounded-md">{day}</div>
+              ))}
+            </div>
+            <div className="grid grid-cols-7 gap-1">
+              {calendarDays.map((dayObj, index) => (
+                <div
+                  key={index}
+                  className={`p-2 rounded-md h-28 overflow-y-auto relative cursor-pointer ${dayObj.isCurrentMonth ? 'bg-white dark:bg-gray-800' : 'bg-pink-100 dark:bg-gray-700 text-pink-400 dark:text-gray-500'} ${dayObj.date.toDateString() === new Date().toDateString() ? 'ring-2 ring-pink-500' : ''}`}
+                  onClick={() => openDayDetail(dayObj.date)} // Added click handler for day detail
+                >
+                  <div className="text-sm font-semibold mb-1">{dayObj.day}</div>
+                  {getSessionsForDay(dayObj.date).map(session => (
+                    <div
+                      key={session.id}
+                      className={`text-xs px-1 py-0.5 rounded-sm mb-1 truncate ${session.isCompleted ? 'bg-gray-300 text-gray-700 line-through' : 'bg-pink-200 text-pink-800'}`}
+                      title={`${session.title} (${formatTime(session.startTime.toDate())} - ${formatTime(session.endTime.toDate())})`}
+                    >
+                      {session.title}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+            <p className="mt-4 text-sm text-pink-600 dark:text-gray-300">
+                Note: Click a day to view detailed sessions for that day.
+            </p>
+          </section>
+
+          {/* Feature Toggle Buttons */}
+          <div className="flex flex-wrap justify-center gap-4 mt-8">
+            <button
+              onClick={() => setShowManualForm(!showManualForm)}
+              className="px-6 py-3 bg-fuchsia-600 text-white rounded-md font-semibold hover:bg-fuchsia-700 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
+            >
+              {showManualForm ? 'Hide Manual Add' : 'Add Manual Session'}
+            </button>
+            <button
+              onClick={() => setShowAiPlanning(!showAiPlanning)}
+              className="px-6 py-3 bg-rose-600 text-white rounded-md font-semibold hover:bg-rose-700 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
+            >
+              {showAiPlanning ? 'Hide AI Planning' : 'Generate AI Plan'}
+            </button>
+            <button
+              onClick={() => setShowAnalytics(!showAnalytics)}
+              className="px-6 py-3 bg-pink-600 text-white rounded-md font-semibold hover:bg-pink-700 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
+            >
+              {showAnalytics ? 'Hide Analytics' : 'Show Analytics'}
+            </button>
+          </div>
+
+          {/* Manual Session Form (Collapsible) */}
+          {showManualForm && (
+            <section className="bg-pink-50 dark:bg-gray-700 p-6 rounded-lg shadow-lg mt-8 ring-1 ring-fuchsia-200 dark:ring-fuchsia-600">
+              <h2 className="text-2xl font-bold text-pink-800 dark:text-gray-100 mb-5">
+                {editingSession ? 'Edit Manual Study Session' : 'Add Manual Study Session'}
+              </h2>
+              <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="col-span-1 md:col-span-2">
+                  <label htmlFor="sessionTitle" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                    Session Title
+                  </label>
+                  <input
+                    type="text"
+                    id="sessionTitle"
+                    className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-pink-500 focus:border-pink-500 bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                    value={sessionTitle}
+                    onChange={(e) => setSessionTitle(e.target.value)}
+                    placeholder="e.g., Math Chapter 5, History Essay Research"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="sessionDate" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                    Date
+                  </label>
+                  <input
+                    type="date"
+                    id="sessionDate"
+                    className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-pink-500 focus:border-pink-500 bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                    value={sessionDate}
+                    onChange={(e) => setSessionDate(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="sessionTime" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                    Time
+                  </label>
+                  <input
+                    type="time"
+                    id="sessionTime"
+                    className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-pink-500 focus:border-pink-500 bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                    value={sessionTime}
+                    onChange={(e) => setSessionTime(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="sessionDuration" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                    Duration (minutes)
+                  </label>
+                  <input
+                    type="number"
+                    id="sessionDuration"
+                    className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-pink-500 focus:border-pink-500 bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                    value={sessionDuration}
+                    onChange={(e) => setSessionDuration(Math.max(15, parseInt(e.target.value) || 15))}
+                    min="15"
+                    step="15"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="sessionSubject" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                    Subject (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    id="sessionSubject"
+                    className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-pink-500 focus:border-pink-500 bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                    value={sessionSubject}
+                    onChange={(e) => setSessionSubject(e.target.value)}
+                    placeholder="e.g., Math, Physics, History"
+                  />
+                </div>
+
+                {/* Recurring Session Options */}
+                <div className="col-span-1 md:col-span-2">
+                  <div className="flex items-center mt-2 mb-2">
+                    <input
+                      type="checkbox"
+                      id="isRecurring"
+                      className="h-4 w-4 text-pink-600 border-pink-300 rounded focus:ring-pink-500 dark:focus:ring-fuchsia-400 dark:border-gray-600 dark:bg-gray-700"
+                      checked={isRecurring}
+                      onChange={(e) => setIsRecurring(e.target.checked)}
+                    />
+                    <label htmlFor="isRecurring" className="ml-2 block text-sm font-medium text-pink-700 dark:text-gray-200">
+                      Make this a recurring session (for next 4 weeks)
+                    </label>
+                  </div>
+
+                  {isRecurring && (
+                    <div className="mt-2 p-3 bg-pink-100 dark:bg-gray-700 rounded-md border border-pink-200 dark:border-gray-600">
+                      <label className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-2">Recurrence Type:</label>
+                      <div className="flex items-center space-x-4 mb-3">
+                        <label className="flex items-center">
+                          <input
+                            type="radio"
+                            name="recurrenceType"
+                            value="daily"
+                            checked={recurrenceType === 'daily'}
+                            onChange={() => setRecurrenceType('daily')}
+                            className="h-4 w-4 text-pink-600 border-pink-300 focus:ring-pink-500 dark:focus:ring-fuchsia-400 dark:border-gray-600 dark:bg-gray-700"
+                          />
+                          <span className="ml-2 text-sm text-pink-700 dark:text-gray-200">Daily</span>
+                        </label>
+                        <label className="flex items-center">
+                          <input
+                            type="radio"
+                            name="recurrenceType"
+                            value="weekly"
+                            checked={recurrenceType === 'weekly'}
+                            onChange={() => setRecurrenceType('weekly')}
+                            className="h-4 w-4 text-pink-600 border-pink-300 focus:ring-pink-500 dark:focus:ring-fuchsia-400 dark:border-gray-600 dark:bg-gray-700"
+                          />
+                          <span className="ml-2 text-sm text-pink-700 dark:text-gray-200">Weekly</span>
+                        </label>
+                      </div>
+
+                      {recurrenceType === 'weekly' && (
+                        <div>
+                          <label className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-2">Select Days:</label>
+                          <div className="flex flex-wrap gap-2">
+                            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
+                              <button
+                                key={day}
+                                type="button"
+                                onClick={() => toggleRecurrenceDay(day)}
+                                className={`px-3 py-1 rounded-md text-sm font-medium transition-all duration-200 ease-in-out ${
+                                  recurrenceDays[day]
+                                    ? 'bg-pink-600 text-white shadow-md'
+                                    : 'bg-pink-200 dark:bg-gray-600 text-pink-800 dark:text-gray-100 hover:bg-pink-300 dark:hover:bg-gray-500'
+                                }`}
+                              >
+                                {day}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="col-span-1 md:col-span-2 flex justify-end gap-3 mt-4">
+                  {editingSession && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingSession(null);
+                        setSessionTitle('');
+                        setSessionDate('');
+                        setSessionTime('');
+                        setSessionDuration(60);
+                        setSessionSubject('');
+                        setIsRecurring(false);
+                        setRecurrenceType('weekly');
+                        setRecurrenceDays({ Mon: false, Tue: false, Wed: false, Thu: false, Fri: false, Sat: false, Sun: false });
+                        setShowManualForm(false);
+                      }}
+                      className="px-6 py-2 bg-pink-300 dark:bg-gray-600 text-pink-800 dark:text-gray-100 rounded-md font-medium hover:bg-pink-400 dark:hover:bg-gray-500 transition duration-200 ease-in-out shadow-md"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
+                  <button
+                    type="submit"
+                    className="px-8 py-2 bg-pink-600 text-white rounded-md font-semibold hover:bg-pink-700 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
+                    disabled={loading}
+                  >
+                    {loading ? 'Saving...' : editingSession ? 'Update Session' : 'Add Session'}
+                  </button>
+                </div>
+              </form>
+            </section>
+          )}
+
+          {/* AI-Powered Study Session Planner (Collapsible) */}
+          {showAiPlanning && (
+            <section className="bg-gradient-to-br from-pink-50 to-rose-50 dark:from-gray-700 dark:to-gray-800 p-6 rounded-lg shadow-xl mt-8 ring-2 ring-pink-300 dark:ring-rose-700">
+              <h2 className="text-2xl font-bold text-pink-800 dark:text-gray-100 mb-5">
+                AI-Powered Daily Schedule
+              </h2>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Task Input with Drag and Drop */}
+                <div>
+                  <h3 className="text-lg font-semibold text-pink-700 dark:text-gray-200 mb-3">Tasks for AI to Plan:</h3>
+                  <div className="flex flex-col sm:flex-row gap-3 mb-4 items-end"> {/* Increased gap, aligned items to end */}
+                    <input
+                      type="text"
+                      id="newTaskInput"
+                      className="flex-grow px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                      placeholder="Add a task (e.g., Math Homework)"
+                      value={newTaskInput}
+                      onChange={(e) => setNewTaskInput(e.target.value)}
+                    />
+                    <div className="w-full sm:w-28"> {/* Explicit width for duration */}
+                        <label htmlFor="newTaskDuration" className="block text-xs font-medium text-pink-700 dark:text-gray-200 mb-1">Duration (min)</label>
+                        <input
+                            type="number"
+                            id="newTaskDuration"
+                            className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                            value={newTaskDuration}
+                            onChange={(e) => setNewTaskDuration(Math.max(15, parseInt(e.target.value) || 15))}
+                            min="15"
+                            step="15"
+                        />
+                    </div>
+                    <div className="w-full sm:w-32"> {/* Explicit width for priority */}
+                        <label htmlFor="newTaskPriority" className="block text-xs font-medium text-pink-700 dark:text-gray-200 mb-1">Priority</label>
+                        <select
+                            id="newTaskPriority"
+                            value={newTaskPriority}
+                            onChange={(e) => setNewTaskPriority(e.target.value)}
+                            className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                        >
+                            <option value="Urgent">Urgent</option>
+                            <option value="High">High</option>
+                            <option value="Medium">Medium</option>
+                            <option value="Low">Low</option>
+                        </select>
+                    </div>
+                    <button
+                      onClick={handleAddTask}
+                      className="px-4 py-2 bg-pink-500 text-white rounded-md font-medium hover:bg-pink-600 transition duration-200 ease-in-out shadow-md"
+                    >
+                      Add Task
+                    </button>
+                  </div>
+                  {dailyTasks.length === 0 ? (
+                    <p className="text-pink-600 dark:text-gray-300 text-sm">No tasks added yet. Drag and drop to reorder!</p>
+                  ) : (
+                    <ul className="space-y-2 max-h-40 overflow-y-auto pr-2">
+                      {dailyTasks.map((task, index) => (
+                        <li
+                          key={task.id}
+                          className="flex items-center justify-between bg-white dark:bg-gray-700 p-2 rounded-md shadow-sm cursor-grab"
+                          draggable
+                          onDragStart={(e) => (dragItem.current = index)}
+                          onDragEnter={(e) => (dragOverItem.current = index)}
+                          onDragEnd={handleSort}
+                          onDragOver={(e) => e.preventDefault()}
+                        >
+                          <span className="text-pink-800 dark:text-gray-100">
+                            {task.title} ({task.duration} min){' '}
+                            <span className={`ml-1 text-xs font-semibold px-2 py-0.5 rounded-full ${task.priority === 'Urgent' ? 'bg-red-200 text-red-800' : task.priority === 'High' ? 'bg-orange-200 text-orange-800' : task.priority === 'Medium' ? 'bg-yellow-200 text-yellow-800' : 'bg-green-200 text-green-800'}`}>
+                              {task.priority}
+                            </span>
+                          </span>
+                          <button
+                            onClick={() => handleRemoveTask(task.id)}
+                            className="text-rose-500 hover:text-rose-700 p-1 rounded-full hover:bg-rose-100 dark:hover:bg-rose-900 transition"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
+                {/* Planning Controls */}
+                <div className="mt-6 lg:mt-0">
+                  <h3 className="text-lg font-semibold text-pink-700 dark:text-gray-200 mb-3">Planning Details:</h3>
+                  <div className="mb-4">
+                    <label htmlFor="aiPlanningDate" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                      Plan for Date
+                    </label>
+                    <input
+                      type="date"
+                      id="aiPlanningDate"
+                      className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                      value={aiPlanningDate}
+                      onChange={(e) => setAiPlanningDate(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="mb-4">
+                    <label htmlFor="availableStudyHours" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                      Available Study Hours
+                    </label>
+                    <input
+                      type="number"
+                      id="availableStudyHours"
+                      className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                      value={availableStudyHours}
+                      onChange={(e) => setAvailableStudyHours(Math.max(1, parseInt(e.target.value) || 1))}
+                      min="1"
+                      step="0.5"
+                      required
+                    />
+                  </div>
+                  {/* Flexible Breaks in AI */}
+                  <div className="mb-4 grid grid-cols-2 gap-4">
+                    <div>
+                      <label htmlFor="aiBreakFrequency" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                        Break Frequency (min)
+                      </label>
+                      <input
+                        type="number"
+                        id="aiBreakFrequency"
+                        className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                        value={aiBreakFrequency}
+                        onChange={(e) => setAiBreakFrequency(Math.max(15, parseInt(e.target.value) || 15))}
+                        min="15"
+                        step="5"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="aiBreakDuration" className="block text-sm font-medium text-pink-700 dark:text-gray-200 mb-1">
+                        Break Duration (min)
+                      </label>
+                      <input
+                        type="number"
+                        id="aiBreakDuration"
+                        className="w-full px-4 py-2 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100"
+                        value={aiBreakDuration}
+                        onChange={(e) => setAiBreakDuration(Math.max(5, parseInt(e.target.value) || 5))}
+                        min="5"
+                        step="5"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={generateScheduleWithAI}
+                    className="w-full px-8 py-3 bg-pink-600 text-white rounded-md font-semibold hover:bg-pink-700 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
+                    disabled={loading || dailyTasks.length === 0}
+                  >
+                    {loading ? 'Generating...' : 'Generate AI Schedule'}
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Progress Tracking & Analytics (Collapsible) */}
+          {showAnalytics && (
+            <section className="bg-pink-50 dark:bg-gray-700 p-6 rounded-lg shadow-lg ring-1 ring-rose-200 dark:ring-rose-600 mt-8">
+              <h2 className="text-2xl font-bold text-pink-800 dark:text-gray-100 mb-5 flex items-center">
+                Analytics & Progress
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-4">
+                <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-md">
+                  <h3 className="text-lg font-semibold text-pink-700 dark:text-gray-200 mb-2">Total Study Time</h3>
+                  <p className="text-2xl font-bold text-rose-600 dark:text-rose-400">{totalStudyTime} minutes</p>
+                  <p className="text-sm text-pink-500 dark:text-gray-400">({(totalStudyTime / 60).toFixed(1)} hours)</p>
+                </div>
+                <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-md">
+                  <h3 className="text-lg font-semibold text-pink-700 dark:text-gray-200 mb-2">Completion Rate</h3>
+                  <p className="text-2xl font-bold text-fuchsia-600 dark:text-fuchsia-400">{completionPercentage.toFixed(1)}%</p>
+                  <p className="text-sm text-pink-500 dark:text-gray-400">{completedStudyTime} / {totalStudyTime} minutes completed</p>
+                </div>
+                <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-md col-span-1 md:col-span-2 lg:col-span-1">
+                  <h3 className="text-lg font-semibold text-pink-700 dark:text-gray-200 mb-2">Time per Subject</h3>
+                  {Object.keys(subjectStudyTime).length === 0 ? (
+                    <p className="text-sm text-pink-500 dark:text-gray-400">No subjects tracked yet.</p>
+                  ) : (
+                    <ul className="text-sm space-y-1">
+                      {Object.entries(subjectStudyTime).map(([subject, time]) => (
+                        <li key={subject} className="flex justify-between items-center text-pink-700 dark:text-gray-200">
+                          <span>{subject}:</span>
+                          <span className="font-semibold">{time} min</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+           {/* List View (Collapsible) */}
+           {showListView && (
+            <section className="bg-pink-50 dark:bg-gray-700 p-6 rounded-lg shadow-lg ring-1 ring-fuchsia-200 dark:ring-fuchsia-600 mt-8">
+              <h2 className="text-2xl font-bold text-pink-800 dark:text-gray-100 mb-5">All Study Sessions (List View)</h2>
+              <div className="mb-4 flex items-center space-x-2">
+                <label htmlFor="subjectFilter" className="text-sm font-medium text-pink-700 dark:text-gray-200">Filter by Subject:</label>
+                <select
+                  id="subjectFilter"
+                  value={selectedSubjectFilter}
+                  onChange={(e) => setSelectedSubjectFilter(e.target.value)}
+                  className="px-3 py-1 border border-pink-300 dark:border-gray-600 rounded-md shadow-sm bg-white dark:bg-gray-800 text-pink-900 dark:text-gray-100 text-sm"
+                >
+                  {availableSubjects.map(subject => (
+                    <option key={subject} value={subject}>{subject}</option>
+                  ))}
+                </select>
+              </div>
+              {filteredStudySessions.length === 0 ? (
+                <p className="text-pink-600 dark:text-gray-300 text-center py-4">No study sessions planned yet. Add one above or let AI plan for you!</p>
+              ) : (
+                <ul className="space-y-4">
+                  {filteredStudySessions.map((session) => (
+                    <li
+                      key={session.id}
+                      className={`bg-white dark:bg-gray-800 p-4 rounded-lg shadow-md flex flex-col sm:flex-row items-start sm:items-center justify-between transition-all duration-300 ease-in-out ${
+                        session.isCompleted ? 'opacity-60 line-through' : 'hover:ring-2 hover:ring-pink-400 dark:hover:ring-fuchsia-500'
+                      }`}
+                    >
+                      <div className="flex-grow mb-2 sm:mb-0">
+                        <h3 className={`text-lg font-semibold ${session.isCompleted ? 'text-pink-500 dark:text-gray-400' : 'text-fuchsia-700 dark:text-fuchsia-300'}`}>
+                          {session.title}
+                          {session.source === 'ai_generated' && (
+                            <span className="ml-2 px-2 py-0.5 bg-rose-100 dark:bg-rose-800 text-rose-700 dark:text-rose-200 rounded-full text-xs font-normal">AI Plan</span>
+                          )}
+                          {session.subject && (
+                            <span className="ml-2 px-2 py-0.5 bg-fuchsia-100 dark:bg-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-200 rounded-full text-xs font-normal">{session.subject}</span>
+                          )}
+                          {session.priority && (
+                            <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-normal ${session.priority === 'Urgent' ? 'bg-red-200 text-red-800' : session.priority === 'High' ? 'bg-orange-200 text-orange-800' : session.priority === 'Medium' ? 'bg-yellow-200 text-yellow-800' : 'bg-green-200 text-green-800'}`}>{session.priority}</span>
+                          )}
+                        </h3>
+                        <p className="text-sm text-pink-600 dark:text-gray-400">
+                          {formatDateTime(session.startTime)} - {formatDateTime(session.endTime)}
+                          <span className="ml-2 px-2 py-0.5 bg-pink-200 dark:bg-gray-600 text-pink-700 dark:text-gray-200 rounded-full text-xs">
+                            {session.duration} min
+                          </span>
+                        </p>
+                      </div>
+                      <div className="flex space-x-2">
+                        <button
+                          onClick={() => toggleComplete(session)}
+                          className={`px-3 py-1 rounded-md text-sm font-medium transition-all duration-200 ease-in-out ${
+                            session.isCompleted
+                              ? 'bg-yellow-500 hover:bg-yellow-600 text-white shadow'
+                              : 'bg-rose-500 hover:bg-rose-600 text-white shadow'
+                          }`}
+                        >
+                          {session.isCompleted ? 'Unmark' : 'Complete'}
+                        </button>
+                        <button
+                          onClick={() => handleEdit(session)}
+                          className="px-3 py-1 bg-fuchsia-500 text-white rounded-md text-sm font-medium hover:bg-fuchsia-600 transition duration-200 ease-in-out shadow"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(session.id)}
+                          className="px-3 py-1 bg-rose-500 text-white rounded-md text-sm font-medium hover:bg-rose-600 transition duration-200 ease-in-out shadow"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+        </main>
+      </div>
+
+      {/* Day Detail Modal */}
+      {showDayDetailModal && selectedDayForDetail && (
+        <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold text-pink-800 dark:text-gray-100">
+                Sessions for {selectedDayForDetail.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+              </h3>
+              <button
+                onClick={closeDayDetail}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                aria-label="Close"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {getSessionsForDay(selectedDayForDetail).length === 0 ? (
+              <p className="text-pink-600 dark:text-gray-300 text-center py-4">No sessions planned for this day.</p>
+            ) : (
+              <ul className="space-y-3">
+                {getSessionsForDay(selectedDayForDetail).map(session => (
+                  <li
+                    key={session.id}
+                    className={`bg-pink-50 dark:bg-gray-700 p-3 rounded-md shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between ${session.isCompleted ? 'opacity-70 line-through' : ''}`}
+                  >
+                    <div className="flex-grow mb-2 sm:mb-0">
+                      <h4 className={`text-md font-semibold ${session.isCompleted ? 'text-pink-500 dark:text-gray-400' : 'text-fuchsia-700 dark:text-fuchsia-300'}`}>
+                        {session.title}
+                        {session.source === 'ai_generated' && (
+                          <span className="ml-2 px-2 py-0.5 bg-rose-100 dark:bg-rose-800 text-rose-700 dark:text-rose-200 rounded-full text-xs font-normal">AI Plan</span>
+                        )}
+                      </h4>
+                      <p className="text-sm text-pink-600 dark:text-gray-400">
+                        {formatTime(session.startTime.toDate())} - {formatTime(session.endTime.toDate())}
+                        <span className="ml-2 px-2 py-0.5 bg-pink-200 dark:bg-gray-600 text-pink-700 dark:text-gray-200 rounded-full text-xs">
+                          {session.duration} min
+                        </span>
+                        {session.subject && (
+                          <span className="ml-2 px-2 py-0.5 bg-fuchsia-100 dark:bg-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-200 rounded-full text-xs font-normal">{session.subject}</span>
+                        )}
+                        {session.priority && (
+                          <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-normal ${session.priority === 'Urgent' ? 'bg-red-200 text-red-800' : session.priority === 'High' ? 'bg-orange-200 text-orange-800' : session.priority === 'Medium' ? 'bg-yellow-200 text-yellow-800' : 'bg-green-200 text-green-800'}`}>{session.priority}</span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex space-x-2 mt-2 sm:mt-0">
+                      <button
+                        onClick={() => toggleComplete(session)}
+                        className={`px-3 py-1 rounded-md text-xs font-medium transition-all duration-200 ease-in-out ${
+                          session.isCompleted
+                            ? 'bg-yellow-500 hover:bg-yellow-600 text-white'
+                            : 'bg-rose-500 hover:bg-rose-600 text-white'
+                        }`}
+                      >
+                        {session.isCompleted ? 'Unmark' : 'Complete'}
+                      </button>
+                      <button
+                        onClick={() => handleEdit(session)}
+                        className="px-3 py-1 bg-fuchsia-500 text-white rounded-md text-xs font-medium hover:bg-fuchsia-600 transition duration-200 ease-in-out"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDelete(session.id)}
+                        className="px-3 py-1 bg-rose-500 text-white rounded-md text-xs font-medium hover:bg-rose-600 transition duration-200 ease-in-out"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="mt-6 text-center">
+              <button
+                onClick={closeDayDetail}
+                className="px-6 py-2 bg-pink-600 text-white rounded-md font-semibold hover:bg-pink-700 transition duration-200 ease-in-out shadow-md"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Modal for Alerts/Confirmations (Existing) */}
+      {showModal && (
+        <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 z-50">
+          <div className="bg-pink-100 dark:bg-gray-800 rounded-lg p-6 shadow-xl w-full max-w-sm text-center">
+            <h3 className="text-xl font-bold text-pink-800 dark:text-gray-100 mb-4">Notification</h3>
+            <p className="text-pink-700 dark:text-gray-200 mb-6">{modalMessage}</p>
+            <div className="flex justify-center space-x-4">
+              {modalCallback ? (
+                <>
+                  <button
+                    onClick={closeModal}
+                    className="px-5 py-2 bg-pink-300 dark:bg-gray-600 text-pink-800 dark:text-gray-100 rounded-md font-medium hover:bg-pink-400 dark:hover:bg-gray-500 transition duration-200 ease-in-out"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleModalConfirm}
+                    className="px-5 py-2 bg-pink-600 text-white rounded-md font-semibold hover:bg-pink-700 transition duration-200 ease-in-out"
+                  >
+                    Confirm
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={closeModal}
+                  className="px-5 py-2 bg-pink-600 text-white rounded-md font-semibold hover:bg-pink-700 transition duration-200 ease-in-out"
+                >
+                  OK
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
