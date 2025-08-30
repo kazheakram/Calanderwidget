@@ -42,15 +42,14 @@ function App() {
 
   // Filter States
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState('All');
-  const [availableSubjects, setAvailableSubjects] = useState([]);
+  const [availableSubjects, setAvailableSubjects] = useState(['All']); // Initialize with 'All'
 
   // UI States
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [currentCalendarDate, setCurrentCalendarDate] = useState(new Date());
   const [showManualForm, setShowManualForm] = useState(false); // New state for manual form visibility
-  // Removed showAiPlanning as AI features are removed for local storage implementation
   const [showAnalytics, setShowAnalytics] = useState(false);
-  const [showListView, setShowListView] = useState(false);
+  const [showListView, setShowListView] = useState(false); // New state for list view visibility
 
   // Load study sessions from local storage on component mount
   useEffect(() => {
@@ -64,11 +63,13 @@ function App() {
           endTime: new Date(session.endTime),
         }));
         setStudySessions(parsedSessions);
-
+        
+        // Ensure subjects are correctly generated
         const subjects = [...new Set(parsedSessions.map(s => s.subject).filter(Boolean))];
         setAvailableSubjects(['All', ...subjects]);
       } else {
-        // If no stored sessions, ensure availableSubjects is initialized with 'All'
+        // Explicitly initialize with an empty array if nothing is in local storage
+        setStudySessions([]);
         setAvailableSubjects(['All']);
       }
     } catch (error) {
@@ -315,12 +316,14 @@ function App() {
     const days = [];
 
     // Fill leading empty days from previous month
-    for (let i = firstDay === 0 ? 6 : firstDay - 1; i > 0; i--) { // Adjust for Sunday (0) to be last
-      days.push({
-        day: prevMonthDays - i + 1,
-        isCurrentMonth: false,
-        date: new Date(year, month - 1, prevMonthDays - i + 1)
-      });
+    const startDayIndex = firstDay === 0 ? 6 : firstDay - 1; // Adjust for Monday start
+    for (let i = startDayIndex; i > 0; i--) {
+        const day = prevMonthDays - i + 1;
+        days.push({
+            day: day,
+            isCurrentMonth: false,
+            date: new Date(year, month - 1, day)
+        });
     }
 
     // Fill current month days
@@ -341,7 +344,6 @@ function App() {
         date: new Date(year, month + 1, i)
       });
     }
-
     return days;
   };
 
@@ -355,6 +357,7 @@ function App() {
 
   const getSessionsForDay = (date) => {
     return studySessions.filter(session => {
+      if (!session.startTime || isNaN(session.startTime.getTime())) return false;
       const sessionDate = session.startTime;
       return sessionDate.getFullYear() === date.getFullYear() &&
              sessionDate.getMonth() === date.getMonth() &&
@@ -412,62 +415,14 @@ function App() {
         <main className="p-6 sm:p-8 lg:p-10">
           {/* Main Title - Centered without header */}
           <h1 className="text-4xl font-extrabold tracking-tight text-center text-pink-800 dark:text-gray-100 mb-6">Study Planner</h1>
-
-          {/* Calendar View (Main Content) */}
-          <section className="bg-pink-50 dark:bg-gray-700 p-6 rounded-lg shadow-lg ring-1 ring-fuchsia-200 dark:ring-fuchsia-600 w-full min-h-[90vh]">
-            <h2 className="text-2xl font-bold text-pink-800 dark:text-gray-100 mb-5">Calendar View</h2>
-            <div className="flex justify-between items-center mb-4">
-              <button onClick={() => navCalendar(-1)} className="p-2 rounded-full bg-pink-500 text-white hover:bg-pink-600">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0  010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
-                </svg>
-              </button>
-              <h3 className="text-xl font-semibold text-pink-800 dark:text-gray-100">
-                {currentCalendarDate.toLocaleString('en-US', { month: 'long', year: 'numeric' })}
-              </h3>
-              <button onClick={() => navCalendar(1)} className="p-2 rounded-full bg-pink-500 text-white hover:bg-pink-600">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                </svg>
-              </button>
-            </div>
-            <div className="grid grid-cols-7 gap-1 text-center text-sm font-medium text-pink-700 dark:text-gray-200 mb-2">
-              {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
-                <div key={day} className="py-2 bg-pink-200 dark:bg-gray-600 rounded-md">{day}</div>
-              ))}
-            </div>
-            <div className="grid grid-cols-7 gap-1">
-              {calendarDays.map((dayObj, index) => (
-                <div
-                  key={index}
-                  className={`p-2 rounded-md h-28 overflow-y-auto relative cursor-pointer ${dayObj.isCurrentMonth ? 'bg-white dark:bg-gray-800' : 'bg-pink-100 dark:bg-gray-700 text-pink-400 dark:text-gray-500'} ${dayObj.date.toDateString() === new Date().toDateString() ? 'ring-2 ring-pink-500' : ''}`}
-                  onClick={() => openDayDetail(dayObj.date)}
-                >
-                  <div className="text-sm font-semibold mb-1">{dayObj.day}</div>
-                  {getSessionsForDay(dayObj.date).map(session => (
-                    <div
-                      key={session.id}
-                      className={`text-xs px-1 py-0.5 rounded-sm mb-1 truncate ${session.isCompleted ? 'bg-gray-300 text-gray-700 line-through' : 'bg-pink-200 text-pink-800'}`}
-                      title={`${session.title} (${formatTime(session.startTime)} - ${formatTime(session.endTime)})`}
-                    >
-                      {session.title}
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-            <p className="mt-4 text-sm text-pink-600 dark:text-gray-300">
-                Note: Click a day to view detailed sessions for that day.
-            </p>
-          </section>
-
+          
           {/* Feature Toggle Buttons */}
-          <div className="flex flex-wrap justify-center gap-4 mt-8">
+          <div className="flex flex-wrap justify-center gap-4 mt-8 mb-6">
             <button
               onClick={() => setShowManualForm(!showManualForm)}
               className="px-6 py-3 bg-fuchsia-600 text-white rounded-md font-semibold hover:bg-fuchsia-700 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
             >
-              {showManualForm ? 'Hide Manual Add' : 'Add Manual Session'}
+              {showManualForm ? 'Hide Manual Form' : 'Add Manual Session'}
             </button>
             <button
               onClick={() => setShowAnalytics(!showAnalytics)}
@@ -475,7 +430,63 @@ function App() {
             >
               {showAnalytics ? 'Hide Analytics' : 'Show Analytics'}
             </button>
+            <button
+              onClick={() => setShowListView(!showListView)}
+              className="px-6 py-3 bg-rose-600 text-white rounded-md font-semibold hover:bg-rose-700 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
+            >
+              {showListView ? 'Hide List View' : 'Show List View'}
+            </button>
           </div>
+          
+          {/* Main Content - Conditionally render based on state */}
+          {(!showManualForm && !showAnalytics && !showListView) && (
+             <section className="bg-pink-50 dark:bg-gray-700 p-6 rounded-lg shadow-lg ring-1 ring-fuchsia-200 dark:ring-fuchsia-600 w-full min-h-[90vh]">
+              <h2 className="text-2xl font-bold text-pink-800 dark:text-gray-100 mb-5">Calendar View</h2>
+              <div className="flex justify-between items-center mb-4">
+                <button onClick={() => navCalendar(-1)} className="p-2 rounded-full bg-pink-500 text-white hover:bg-pink-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0  010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                </button>
+                <h3 className="text-xl font-semibold text-pink-800 dark:text-gray-100">
+                  {currentCalendarDate.toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+                </h3>
+                <button onClick={() => navCalendar(1)} className="p-2 rounded-full bg-pink-500 text-white hover:bg-pink-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+              <div className="grid grid-cols-7 gap-1 text-center text-sm font-medium text-pink-700 dark:text-gray-200 mb-2">
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
+                  <div key={day} className="py-2 bg-pink-200 dark:bg-gray-600 rounded-md">{day}</div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {calendarDays.map((dayObj, index) => (
+                  <div
+                    key={index}
+                    className={`p-2 rounded-md h-28 overflow-y-auto relative cursor-pointer ${dayObj.isCurrentMonth ? 'bg-white dark:bg-gray-800' : 'bg-pink-100 dark:bg-gray-700 text-pink-400 dark:text-gray-500'} ${dayObj.date.toDateString() === new Date().toDateString() ? 'ring-2 ring-pink-500' : ''}`}
+                    onClick={() => openDayDetail(dayObj.date)}
+                  >
+                    <div className="text-sm font-semibold mb-1">{dayObj.day}</div>
+                    {getSessionsForDay(dayObj.date).map(session => (
+                      <div
+                        key={session.id}
+                        className={`text-xs px-1 py-0.5 rounded-sm mb-1 truncate ${session.isCompleted ? 'bg-gray-300 text-gray-700 line-through' : 'bg-pink-200 text-pink-800'}`}
+                        title={`${session.title} (${formatTime(session.startTime)} - ${formatTime(session.endTime)})`}
+                      >
+                        {session.title}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <p className="mt-4 text-sm text-pink-600 dark:text-gray-300">
+                  Note: Click a day to view detailed sessions for that day.
+              </p>
+            </section>
+          )}
 
           {/* Manual Session Form (Collapsible) */}
           {showManualForm && (
@@ -658,8 +669,6 @@ function App() {
             </section>
           )}
 
-          {/* AI-Powered Study Session Planner (Removed for local storage implementation) */}
-
           {/* Progress Tracking & Analytics (Collapsible) */}
           {showAnalytics && (
             <section className="bg-pink-50 dark:bg-gray-700 p-6 rounded-lg shadow-lg ring-1 ring-rose-200 dark:ring-rose-600 mt-8">
@@ -713,7 +722,7 @@ function App() {
                 </select>
               </div>
               {filteredStudySessions.length === 0 ? (
-                <p className="text-pink-600 dark:text-gray-300 text-center py-4">No study sessions planned yet. Add one above or let AI plan for you!</p>
+                <p className="text-pink-600 dark:text-gray-300 text-center py-4">No study sessions planned yet. Add one with the manual form.</p>
               ) : (
                 <ul className="space-y-4">
                   {filteredStudySessions.map((session) => (
@@ -732,7 +741,6 @@ function App() {
                           {session.subject && (
                             <span className="ml-2 px-2 py-0.5 bg-fuchsia-100 dark:bg-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-200 rounded-full text-xs font-normal">{session.subject}</span>
                           )}
-                           {/* Priority is no longer applicable without AI planning */}
                         </h3>
                         <p className="text-sm text-pink-600 dark:text-gray-400">
                           {formatDateTime(session.startTime)} - {formatDateTime(session.endTime)}
@@ -771,6 +779,14 @@ function App() {
               )}
             </section>
           )}
+
+          {/* This section will show if the user has a bug in their code - Added to provide more context to the user */}
+          {(showManualForm || showAnalytics || showListView) && (
+            <p className="mt-4 text-sm text-pink-600 dark:text-gray-300 text-center">
+              A view is currently open. Please close it to see the calendar.
+            </p>
+          )}
+
         </main>
       </div>
 
@@ -816,7 +832,6 @@ function App() {
                         {session.subject && (
                           <span className="ml-2 px-2 py-0.5 bg-fuchsia-100 dark:bg-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-200 rounded-full text-xs font-normal">{session.subject}</span>
                         )}
-                        {/* Priority is no longer applicable without AI planning */}
                       </p>
                     </div>
                     <div className="flex space-x-2 mt-2 sm:mt-0">
